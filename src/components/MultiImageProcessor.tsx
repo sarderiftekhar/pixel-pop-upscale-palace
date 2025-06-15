@@ -38,6 +38,7 @@ const MultiImageProcessor = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [currentProcessingIndex, setCurrentProcessingIndex] = useState(-1);
+  const [maxConcurrentProcessing, setMaxConcurrentProcessing] = useState(3); // Process up to 3 images simultaneously
   const [totalEstimatedCredits, setTotalEstimatedCredits] = useState<number>(0);
   const [totalUsedCredits, setTotalUsedCredits] = useState<number>(0);
   const { toast } = useToast();
@@ -122,45 +123,19 @@ const MultiImageProcessor = ({
     }
   }, [selectedScale, processedImages]);
 
-  const processNextImage = useCallback(async () => {
-    if (isPausedRef.current) {
-      console.log('⏸️ Processing paused, skipping');
+  const processImageAtIndex = useCallback(async (imageIndex: number) => {
+    const imageToProcess = processedImagesRef.current[imageIndex];
+    if (!imageToProcess || imageToProcess.status !== 'pending') {
       return;
     }
 
-    const currentImages = processedImagesRef.current;
-    const nextIndex = currentImages.findIndex(img => img.status === 'pending');
-    
-    console.log('🔍 Looking for next image to process...');
-    console.log('📊 Current status:', {
-      total: currentImages.length,
-      pending: currentImages.filter(img => img.status === 'pending').length,
-      processing: currentImages.filter(img => img.status === 'processing').length,
-      completed: currentImages.filter(img => img.status === 'completed').length,
-      failed: currentImages.filter(img => img.status === 'failed').length,
-      nextIndex
-    });
-    
-    if (nextIndex === -1) {
-      // All images processed
-      console.log('✅ All images processed, finishing batch');
-      setIsProcessing(false);
-      setCurrentProcessingIndex(-1);
-      onProcessingComplete(currentImages);
-      return;
-    }
-
-    setCurrentProcessingIndex(nextIndex);
-    const imageToProcess = currentImages[nextIndex];
-    
-    console.log(`🚀 Starting to process image ${nextIndex + 1}/${currentImages.length}: ${imageToProcess.file.name}`);
+    console.log(`🚀 Starting to process image ${imageIndex + 1}: ${imageToProcess.file.name}`);
 
     // Update status to processing
     setProcessedImages(prev => {
-      const updated = prev.map((img, idx) => 
-        idx === nextIndex ? { ...img, status: 'processing' as const, progress: 0 } : img
-      );
-      processedImagesRef.current = updated; // Update ref immediately
+      const updated = [...prev];
+      updated[imageIndex] = { ...updated[imageIndex], status: 'processing' as const, progress: 0 };
+      processedImagesRef.current = updated;
       return updated;
     });
 
@@ -171,15 +146,11 @@ const MultiImageProcessor = ({
         const roundedProgress = Math.round(progress / 5) * 5; // Round to nearest 5%
         
         setProcessedImages(prev => {
-          const current = prev[nextIndex];
+          const current = prev[imageIndex];
           // Only update if progress changed significantly
           if (current && Math.abs(current.progress - roundedProgress) >= 5) {
-            const updated = prev.map((img, idx) => 
-              idx === nextIndex ? { 
-                ...img, 
-                progress: roundedProgress
-              } : img
-            );
+            const updated = [...prev];
+            updated[imageIndex] = { ...updated[imageIndex], progress: roundedProgress };
             processedImagesRef.current = updated;
             return updated;
           }
@@ -210,10 +181,10 @@ const MultiImageProcessor = ({
       };
 
       setProcessedImages(prev => {
-        const updated = [...prev]; // Create new array to force re-render
-        updated[nextIndex] = completedImage;
+        const updated = [...prev];
+        updated[imageIndex] = completedImage;
         processedImagesRef.current = updated;
-        console.log(`✅ Image ${nextIndex + 1} completed successfully:`, {
+        console.log(`✅ Image ${imageIndex + 1} completed successfully:`, {
           hasBlob: !!upscaledBlob,
           hasUrl: !!processedUrl,
           fileName: imageToProcess.file.name,
@@ -232,14 +203,6 @@ const MultiImageProcessor = ({
         description: `${imageToProcess.file.name} upscaled ${selectedScaleRef.current}x successfully!`,
       });
 
-      // Process next image immediately after successful completion
-      setTimeout(() => {
-        if (!isPausedRef.current) {
-          console.log('🔄 Processing next image after successful completion');
-          processNextImage();
-        }
-      }, 500); // Reduced delay to 500ms for faster processing
-
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
       
@@ -252,8 +215,8 @@ const MultiImageProcessor = ({
       };
 
       setProcessedImages(prev => {
-        const updated = [...prev]; // Create new array to force re-render
-        updated[nextIndex] = failedImage;
+        const updated = [...prev];
+        updated[imageIndex] = failedImage;
         processedImagesRef.current = updated;
         return updated;
       });
@@ -263,31 +226,86 @@ const MultiImageProcessor = ({
         description: `${imageToProcess.file.name}: ${errorMessage}`,
         variant: "destructive",
       });
+    }
+  }, [onCreditDeduction, toast]);
 
-      // Continue with next image after error
+  const startParallelProcessing = useCallback(async () => {
+    if (isPausedRef.current) {
+      console.log('⏸️ Processing paused, skipping');
+      return;
+    }
+
+    const currentImages = processedImagesRef.current;
+    const pendingIndices = currentImages
+      .map((img, index) => ({ img, index }))
+      .filter(({ img }) => img.status === 'pending')
+      .map(({ index }) => index);
+    
+    const processingCount = currentImages.filter(img => img.status === 'processing').length;
+    const availableSlots = maxConcurrentProcessing - processingCount;
+    
+    console.log('🔍 Parallel processing check:', {
+      total: currentImages.length,
+      pending: pendingIndices.length,
+      processing: processingCount,
+      completed: currentImages.filter(img => img.status === 'completed').length,
+      failed: currentImages.filter(img => img.status === 'failed').length,
+      availableSlots,
+      maxConcurrent: maxConcurrentProcessing
+    });
+    
+    if (pendingIndices.length === 0 && processingCount === 0) {
+      // All images processed
+      console.log('✅ All images processed, finishing batch');
+      setIsProcessing(false);
+      setCurrentProcessingIndex(-1);
+      onProcessingComplete(currentImages);
+      return;
+    }
+
+    // Start processing up to available slots
+    const indicesToProcess = pendingIndices.slice(0, availableSlots);
+    
+    if (indicesToProcess.length > 0) {
+      console.log(`🚀 Starting parallel processing of ${indicesToProcess.length} images:`, 
+        indicesToProcess.map(i => currentImages[i].file.name));
+      
+      // Process images in parallel
+      const processingPromises = indicesToProcess.map(index => 
+        processImageAtIndex(index).then(() => {
+          // After each image completes, check if we can start more
+          setTimeout(() => {
+            if (!isPausedRef.current) {
+              startParallelProcessing();
+            }
+          }, 100);
+        })
+      );
+      
+      // Don't await all - let them run in parallel
+      // Just start the next batch check after a short delay
       setTimeout(() => {
         if (!isPausedRef.current) {
-          console.log('🔄 Processing next image after error');
-          processNextImage();
+          startParallelProcessing();
         }
-      }, 1000); // Shorter delay after errors
+      }, 1000);
     }
-  }, [onProcessingComplete, onCreditDeduction, toast]);
+  }, [processImageAtIndex, onProcessingComplete, maxConcurrentProcessing]);
 
   const handleStartProcessing = useCallback(() => {
     setIsProcessing(true);
     setIsPaused(false);
     setTotalUsedCredits(0);
-    processNextImage();
-  }, [processNextImage]);
+    startParallelProcessing();
+  }, [startParallelProcessing]);
 
   const handlePauseResume = useCallback(() => {
     setIsPaused(!isPaused);
     if (isPaused) {
       // Resume processing
-      processNextImage();
+      startParallelProcessing();
     }
-  }, [isPaused, processNextImage]);
+  }, [isPaused, startParallelProcessing]);
 
   const handleRetryFailed = useCallback(() => {
     setProcessedImages(prev => prev.map(img => 
@@ -348,7 +366,7 @@ const MultiImageProcessor = ({
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid md:grid-cols-2 gap-4">
+          <div className="grid md:grid-cols-3 gap-4">
             <div>
               <label className="text-white/90 text-sm font-medium mb-2 block">
                 Upscaling Factor
@@ -370,6 +388,47 @@ const MultiImageProcessor = ({
                       </div>
                     </SelectItem>
                   ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div>
+              <label className="text-white/90 text-sm font-medium mb-2 block">
+                Concurrent Processing
+              </label>
+              <Select 
+                value={maxConcurrentProcessing.toString()} 
+                onValueChange={(value) => setMaxConcurrentProcessing(Number(value))}
+                disabled={isProcessing}
+              >
+                <SelectTrigger className="bg-white/10 border-white/20 text-white">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-gray-900 border-gray-700">
+                  <SelectItem value="1" className="text-white hover:bg-gray-800">
+                    <div className="flex flex-col">
+                      <span className="font-medium">1 at a time</span>
+                      <span className="text-xs text-gray-400">Sequential (safest)</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="2" className="text-white hover:bg-gray-800">
+                    <div className="flex flex-col">
+                      <span className="font-medium">2 at a time</span>
+                      <span className="text-xs text-gray-400">Moderate speed</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="3" className="text-white hover:bg-gray-800">
+                    <div className="flex flex-col">
+                      <span className="font-medium">3 at a time</span>
+                      <span className="text-xs text-gray-400">Fast (recommended)</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="5" className="text-white hover:bg-gray-800">
+                    <div className="flex flex-col">
+                      <span className="font-medium">5 at a time</span>
+                      <span className="text-xs text-gray-400">Maximum speed</span>
+                    </div>
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -401,6 +460,11 @@ const MultiImageProcessor = ({
             <AlertCircle className="h-4 w-4 text-blue-400" />
             <AlertDescription className="text-blue-300">
               Estimated total cost: {totalEstimatedCredits} credits | Used: {totalUsedCredits} credits
+              {isProcessing && (
+                <span className="ml-2 text-yellow-300">
+                  • Processing up to {maxConcurrentProcessing} images simultaneously
+                </span>
+              )}
             </AlertDescription>
           </Alert>
 
@@ -496,7 +560,7 @@ const MultiImageProcessor = ({
                       <div className="text-center text-white/50">
                         {/* Always reserve space for spinner to prevent layout shift */}
                         <div className="h-6 w-6 mx-auto mb-1 flex items-center justify-center">
-                          {image.status === 'processing' && currentProcessingIndex === index && (
+                          {image.status === 'processing' && (
                             <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-white"></div>
                           )}
                         </div>
