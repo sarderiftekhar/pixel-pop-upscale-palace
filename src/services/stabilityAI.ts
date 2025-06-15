@@ -65,22 +65,28 @@ export class StabilityAIService {
           'Content-Type': 'multipart/form-data',
         },
         responseType: 'blob',
-        timeout: 45000, // 45 seconds timeout (fast upscaler is quicker)
+        timeout: 60000, // Increased timeout to 60 seconds for better reliability
         onUploadProgress: (progressEvent) => {
+          // Throttle progress updates to reduce resource usage
           const progress = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
-          onProgress?.({ 
-            progress: Math.min(progress * 0.3, 30), 
-            status: 'processing', 
-            message: 'Uploading image...' 
-          });
+          if (progress % 20 === 0) { // Only update every 20%
+            onProgress?.({ 
+              progress: Math.min(progress * 0.3, 30), 
+              status: 'processing', 
+              message: 'Uploading...' 
+            });
+          }
         },
         onDownloadProgress: (progressEvent) => {
+          // Throttle progress updates to reduce resource usage
           const progress = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
-          onProgress?.({ 
-            progress: 30 + Math.min(progress * 0.7, 70), 
-            status: 'processing', 
-            message: 'Fast upscaling and downloading image...' 
-          });
+          if (progress % 20 === 0) { // Only update every 20%
+            onProgress?.({ 
+              progress: 30 + Math.min(progress * 0.7, 70), 
+              status: 'processing', 
+              message: 'Processing...' 
+            });
+          }
         },
       });
 

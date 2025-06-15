@@ -38,7 +38,7 @@ const MultiImageProcessor = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [currentProcessingIndex, setCurrentProcessingIndex] = useState(-1);
-  const [maxConcurrentProcessing, setMaxConcurrentProcessing] = useState(3); // Process up to 3 images simultaneously
+  const [maxConcurrentProcessing, setMaxConcurrentProcessing] = useState(2); // Default to 2, max 3
   const [totalEstimatedCredits, setTotalEstimatedCredits] = useState<number>(0);
   const [totalUsedCredits, setTotalUsedCredits] = useState<number>(0);
   const { toast } = useToast();
@@ -97,7 +97,7 @@ const MultiImageProcessor = ({
     }
   }, [images, selectedScale]);
 
-  // Update estimated credits when scale changes
+  // Update estimated credits when scale changes (debounced to prevent excessive updates)
   useEffect(() => {
     const updateEstimates = async () => {
       const updated = await Promise.all(
@@ -118,10 +118,15 @@ const MultiImageProcessor = ({
       setTotalEstimatedCredits(total);
     };
 
-    if (processedImages.length > 0) {
-      updateEstimates();
-    }
-  }, [selectedScale, processedImages]);
+    // Debounce the update to prevent excessive re-renders
+    const timeoutId = setTimeout(() => {
+      if (processedImages.length > 0 && !isProcessing) {
+        updateEstimates();
+      }
+    }, 300);
+
+    return () => clearTimeout(timeoutId);
+  }, [selectedScale, processedImages.length, isProcessing]); // Removed processedImages dependency to prevent loops
 
   const processImageAtIndex = useCallback(async (imageIndex: number) => {
     const imageToProcess = processedImagesRef.current[imageIndex];
@@ -141,14 +146,14 @@ const MultiImageProcessor = ({
 
     try {
       const progressCallback = (progressData: UpscaleProgress) => {
-        // Throttle progress updates to reduce screen shaking
+        // Throttle progress updates more aggressively to reduce screen shaking
         const progress = progressData.progress || 0;
-        const roundedProgress = Math.round(progress / 5) * 5; // Round to nearest 5%
+        const roundedProgress = Math.round(progress / 10) * 10; // Round to nearest 10%
         
         setProcessedImages(prev => {
           const current = prev[imageIndex];
-          // Only update if progress changed significantly
-          if (current && Math.abs(current.progress - roundedProgress) >= 5) {
+          // Only update if progress changed significantly (10% or more)
+          if (current && Math.abs(current.progress - roundedProgress) >= 10) {
             const updated = [...prev];
             updated[imageIndex] = { ...updated[imageIndex], progress: roundedProgress };
             processedImagesRef.current = updated;
@@ -229,66 +234,77 @@ const MultiImageProcessor = ({
     }
   }, [onCreditDeduction, toast]);
 
+  // Add a ref to prevent multiple simultaneous calls to startParallelProcessing
+  const isProcessingQueueRef = useRef(false);
+
   const startParallelProcessing = useCallback(async () => {
     if (isPausedRef.current) {
       console.log('⏸️ Processing paused, skipping');
       return;
     }
 
-    const currentImages = processedImagesRef.current;
-    const pendingIndices = currentImages
-      .map((img, index) => ({ img, index }))
-      .filter(({ img }) => img.status === 'pending')
-      .map(({ index }) => index);
-    
-    const processingCount = currentImages.filter(img => img.status === 'processing').length;
-    const availableSlots = maxConcurrentProcessing - processingCount;
-    
-    console.log('🔍 Parallel processing check:', {
-      total: currentImages.length,
-      pending: pendingIndices.length,
-      processing: processingCount,
-      completed: currentImages.filter(img => img.status === 'completed').length,
-      failed: currentImages.filter(img => img.status === 'failed').length,
-      availableSlots,
-      maxConcurrent: maxConcurrentProcessing
-    });
-    
-    if (pendingIndices.length === 0 && processingCount === 0) {
-      // All images processed
-      console.log('✅ All images processed, finishing batch');
-      setIsProcessing(false);
-      setCurrentProcessingIndex(-1);
-      onProcessingComplete(currentImages);
+    // Prevent multiple simultaneous calls
+    if (isProcessingQueueRef.current) {
+      console.log('🔄 Queue already being processed, skipping');
       return;
     }
 
-    // Start processing up to available slots
-    const indicesToProcess = pendingIndices.slice(0, availableSlots);
-    
-    if (indicesToProcess.length > 0) {
-      console.log(`🚀 Starting parallel processing of ${indicesToProcess.length} images:`, 
-        indicesToProcess.map(i => currentImages[i].file.name));
+    isProcessingQueueRef.current = true;
+
+    try {
+      const currentImages = processedImagesRef.current;
+      const pendingIndices = currentImages
+        .map((img, index) => ({ img, index }))
+        .filter(({ img }) => img.status === 'pending')
+        .map(({ index }) => index);
       
-      // Process images in parallel
-      const processingPromises = indicesToProcess.map(index => 
-        processImageAtIndex(index).then(() => {
-          // After each image completes, check if we can start more
-          setTimeout(() => {
-            if (!isPausedRef.current) {
-              startParallelProcessing();
-            }
-          }, 100);
-        })
-      );
+      const processingCount = currentImages.filter(img => img.status === 'processing').length;
+      const availableSlots = maxConcurrentProcessing - processingCount;
       
-      // Don't await all - let them run in parallel
-      // Just start the next batch check after a short delay
-      setTimeout(() => {
-        if (!isPausedRef.current) {
-          startParallelProcessing();
+      // Reduce console logging to improve performance
+      if (pendingIndices.length > 0 || processingCount > 0) {
+        console.log('🔍 Queue status:', {
+          pending: pendingIndices.length,
+          processing: processingCount,
+          completed: currentImages.filter(img => img.status === 'completed').length,
+          availableSlots
+        });
+      }
+      
+      if (pendingIndices.length === 0 && processingCount === 0) {
+        // All images processed
+        console.log('✅ All images processed, finishing batch');
+        setIsProcessing(false);
+        setCurrentProcessingIndex(-1);
+        onProcessingComplete(currentImages);
+        return;
+      }
+
+      // Start processing up to available slots
+      const indicesToProcess = pendingIndices.slice(0, availableSlots);
+      
+              if (indicesToProcess.length > 0) {
+          console.log(`🚀 Processing ${indicesToProcess.length} images`);
+          
+          // Process images in parallel without recursive calls
+          const processingPromises = indicesToProcess.map(index => 
+            processImageAtIndex(index).catch(error => {
+              console.error(`❌ Image ${index} failed:`, error.message);
+              return null; // Continue processing other images even if one fails
+            })
+          );
+
+          // Wait for at least one image to complete before checking queue again
+          Promise.race(processingPromises).then(() => {
+            setTimeout(() => {
+              if (!isPausedRef.current) {
+                startParallelProcessing();
+              }
+            }, 1000); // Increased delay to reduce resource usage
+          });
         }
-      }, 1000);
+    } finally {
+      isProcessingQueueRef.current = false;
     }
   }, [processImageAtIndex, onProcessingComplete, maxConcurrentProcessing]);
 
@@ -414,19 +430,13 @@ const MultiImageProcessor = ({
                   <SelectItem value="2" className="text-white hover:bg-gray-800">
                     <div className="flex flex-col">
                       <span className="font-medium">2 at a time</span>
-                      <span className="text-xs text-gray-400">Moderate speed</span>
+                      <span className="text-xs text-gray-400">Moderate speed (default)</span>
                     </div>
                   </SelectItem>
                   <SelectItem value="3" className="text-white hover:bg-gray-800">
                     <div className="flex flex-col">
                       <span className="font-medium">3 at a time</span>
-                      <span className="text-xs text-gray-400">Fast (recommended)</span>
-                    </div>
-                  </SelectItem>
-                  <SelectItem value="5" className="text-white hover:bg-gray-800">
-                    <div className="flex flex-col">
-                      <span className="font-medium">5 at a time</span>
-                      <span className="text-xs text-gray-400">Maximum speed</span>
+                      <span className="text-xs text-gray-400">Fastest</span>
                     </div>
                   </SelectItem>
                 </SelectContent>
