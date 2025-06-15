@@ -92,7 +92,7 @@ const Auth = () => {
           <CardDescription className="text-white/70">
             {isLogin 
               ? 'Sign in to your account to continue' 
-              : 'Create an account and get 10 free credits'
+                              : 'Create an account and get 100 free credits'
             }
           </CardDescription>
         </CardHeader>

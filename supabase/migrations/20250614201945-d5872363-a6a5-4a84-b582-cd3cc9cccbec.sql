@@ -51,7 +51,7 @@ BEGIN
     NEW.id,
     NEW.email,
     COALESCE(NEW.raw_user_meta_data->>'full_name', ''),
-    10  -- Give new users 10 free credits
+    100  -- Give new users 100 free credits
   );
   RETURN NEW;
 END;

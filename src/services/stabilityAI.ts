@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const STABILITY_API_URL = 'https://api.stability.ai/v2beta/stable-image/upscale/conservative';
+const STABILITY_API_URL = 'https://api.stability.ai/v2beta/stable-image/upscale/fast';
 
 export interface UpscaleOptions {
   scale: number;
@@ -46,13 +46,17 @@ export class StabilityAIService {
         throw new Error('Image file size must be less than 10MB.');
       }
 
-      // Prepare form data for v2beta API
+      // Prepare form data for v2beta fast upscaler API
       const formData = new FormData();
       formData.append('image', imageFile);
-      formData.append('prompt', 'high quality, detailed, sharp, professional photography');
       formData.append('output_format', options.format || 'png');
+      
+      // Add prompt for better quality (optional for fast upscaler)
+      if (options.scale) {
+        formData.append('prompt', 'high quality, detailed, sharp, professional photography');
+      }
 
-      onProgress?.({ progress: 10, status: 'processing', message: 'Sending image to Stability AI...' });
+      onProgress?.({ progress: 10, status: 'processing', message: 'Sending image to Stability AI Fast Upscaler...' });
 
       const response = await axios.post(STABILITY_API_URL, formData, {
         headers: {
@@ -61,7 +65,7 @@ export class StabilityAIService {
           'Content-Type': 'multipart/form-data',
         },
         responseType: 'blob',
-        timeout: 120000, // 2 minutes timeout
+        timeout: 45000, // 45 seconds timeout (fast upscaler is quicker)
         onUploadProgress: (progressEvent) => {
           const progress = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
           onProgress?.({ 
@@ -75,12 +79,12 @@ export class StabilityAIService {
           onProgress?.({ 
             progress: 30 + Math.min(progress * 0.7, 70), 
             status: 'processing', 
-            message: 'Processing and downloading upscaled image...' 
+            message: 'Fast upscaling and downloading image...' 
           });
         },
       });
 
-      onProgress?.({ progress: 100, status: 'completed', message: 'Image upscaled successfully!' });
+      onProgress?.({ progress: 100, status: 'completed', message: 'Image fast upscaled successfully!' });
 
       return response.data;
     } catch (error) {
