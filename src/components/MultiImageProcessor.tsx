@@ -17,21 +17,18 @@ interface ProcessedImage extends UploadedImage {
   processedBlob?: Blob;
   error?: string;
   scale?: number;
-  estimatedCredits?: number;
 }
 
 interface MultiImageProcessorProps {
   images: UploadedImage[];
   onProcessingComplete: (results: ProcessedImage[]) => void;
   onProcessingError: (error: string) => void;
-  onCreditDeduction: (amount: number) => void;
 }
 
 const MultiImageProcessor = ({
   images,
   onProcessingComplete,
-  onProcessingError,
-  onCreditDeduction
+  onProcessingError
 }: MultiImageProcessorProps) => {
   const [processedImages, setProcessedImages] = useState<ProcessedImage[]>([]);
   const [selectedScale, setSelectedScale] = useState<number>(2);
@@ -39,8 +36,6 @@ const MultiImageProcessor = ({
   const [isPaused, setIsPaused] = useState(false);
   const [currentProcessingIndex, setCurrentProcessingIndex] = useState(-1);
   const [maxConcurrentProcessing, setMaxConcurrentProcessing] = useState(2); // Default to 2, max 3
-  const [totalEstimatedCredits, setTotalEstimatedCredits] = useState<number>(0);
-  const [totalUsedCredits, setTotalUsedCredits] = useState<number>(0);
   const { toast } = useToast();
 
   // Use refs to avoid stale closure issues
@@ -69,27 +64,15 @@ const MultiImageProcessor = ({
 
   // Initialize processed images when images prop changes
   useEffect(() => {
-    const initializeImages = async () => {
-      const initialized = await Promise.all(
-        images.map(async (image) => {
-          const estimatedCredits = await StabilityAIService.estimateCreditCost(image.file, selectedScale)
-            .catch(() => selectedScale); // Fallback to scale as credit cost
-          
-          return {
-            ...image,
-            status: 'pending' as const,
-            progress: 0,
-            scale: selectedScale,
-            estimatedCredits
-          };
-        })
-      );
+    const initializeImages = () => {
+      const initialized = images.map((image) => ({
+        ...image,
+        status: 'pending' as const,
+        progress: 0,
+        scale: selectedScale
+      }));
       
       setProcessedImages(initialized);
-      
-      // Calculate total estimated credits
-      const total = initialized.reduce((sum, img) => sum + (img.estimatedCredits || selectedScale), 0);
-      setTotalEstimatedCredits(total);
     };
 
     if (images.length > 0) {
@@ -97,36 +80,28 @@ const MultiImageProcessor = ({
     }
   }, [images, selectedScale]);
 
-  // Update estimated credits when scale changes (debounced to prevent excessive updates)
+  // Update scale when scale changes
   useEffect(() => {
-    const updateEstimates = async () => {
-      const updated = await Promise.all(
-        processedImages.map(async (image) => {
-          if (image.status === 'pending' || image.status === 'failed') {
-            const estimatedCredits = await StabilityAIService.estimateCreditCost(image.file, selectedScale)
-              .catch(() => selectedScale);
-            return { ...image, scale: selectedScale, estimatedCredits };
-          }
-          return image;
-        })
-      );
+    const updateScale = () => {
+      const updated = processedImages.map((image) => {
+        if (image.status === 'pending' || image.status === 'failed') {
+          return { ...image, scale: selectedScale };
+        }
+        return image;
+      });
       
       setProcessedImages(updated);
-      
-      // Recalculate total
-      const total = updated.reduce((sum, img) => sum + (img.estimatedCredits || selectedScale), 0);
-      setTotalEstimatedCredits(total);
     };
 
     // Debounce the update to prevent excessive re-renders
     const timeoutId = setTimeout(() => {
       if (processedImages.length > 0 && !isProcessing) {
-        updateEstimates();
+        updateScale();
       }
     }, 300);
 
     return () => clearTimeout(timeoutId);
-  }, [selectedScale, processedImages.length, isProcessing]); // Removed processedImages dependency to prevent loops
+  }, [selectedScale, processedImages.length, isProcessing]);
 
   const processImageAtIndex = useCallback(async (imageIndex: number) => {
     const imageToProcess = processedImagesRef.current[imageIndex];
@@ -198,11 +173,6 @@ const MultiImageProcessor = ({
         return updated;
       });
 
-      // Deduct credits
-      const creditsUsed = imageToProcess.estimatedCredits || selectedScaleRef.current;
-      setTotalUsedCredits(prev => prev + creditsUsed);
-      onCreditDeduction(creditsUsed);
-
       toast({
         title: "Image Processed!",
         description: `${imageToProcess.file.name} upscaled ${selectedScaleRef.current}x successfully!`,
@@ -232,7 +202,7 @@ const MultiImageProcessor = ({
         variant: "destructive",
       });
     }
-  }, [onCreditDeduction, toast]);
+  }, [toast]);
 
   // Add a ref to prevent multiple simultaneous calls to startParallelProcessing
   const isProcessingQueueRef = useRef(false);
@@ -283,26 +253,26 @@ const MultiImageProcessor = ({
       // Start processing up to available slots
       const indicesToProcess = pendingIndices.slice(0, availableSlots);
       
-              if (indicesToProcess.length > 0) {
-          console.log(`🚀 Processing ${indicesToProcess.length} images`);
-          
-          // Process images in parallel without recursive calls
-          const processingPromises = indicesToProcess.map(index => 
-            processImageAtIndex(index).catch(error => {
-              console.error(`❌ Image ${index} failed:`, error.message);
-              return null; // Continue processing other images even if one fails
-            })
-          );
+      if (indicesToProcess.length > 0) {
+        console.log(`🚀 Processing ${indicesToProcess.length} images`);
+        
+        // Process images in parallel without recursive calls
+        const processingPromises = indicesToProcess.map(index => 
+          processImageAtIndex(index).catch(error => {
+            console.error(`❌ Image ${index} failed:`, error.message);
+            return null; // Continue processing other images even if one fails
+          })
+        );
 
-          // Wait for at least one image to complete before checking queue again
-          Promise.race(processingPromises).then(() => {
-            setTimeout(() => {
-              if (!isPausedRef.current) {
-                startParallelProcessing();
-              }
-            }, 1000); // Increased delay to reduce resource usage
-          });
-        }
+        // Wait for at least one image to complete before checking queue again
+        Promise.race(processingPromises).then(() => {
+          setTimeout(() => {
+            if (!isPausedRef.current) {
+              startParallelProcessing();
+            }
+          }, 1000); // Increased delay to reduce resource usage
+        });
+      }
     } finally {
       isProcessingQueueRef.current = false;
     }
@@ -311,7 +281,6 @@ const MultiImageProcessor = ({
   const handleStartProcessing = useCallback(() => {
     setIsProcessing(true);
     setIsPaused(false);
-    setTotalUsedCredits(0);
     startParallelProcessing();
   }, [startParallelProcessing]);
 
@@ -465,18 +434,6 @@ const MultiImageProcessor = ({
               </div>
             </div>
           </div>
-
-          <Alert className="bg-blue-500/10 border-blue-500/20">
-            <AlertCircle className="h-4 w-4 text-blue-400" />
-            <AlertDescription className="text-blue-300">
-              Estimated total cost: {totalEstimatedCredits} credits | Used: {totalUsedCredits} credits
-              {isProcessing && (
-                <span className="ml-2 text-yellow-300">
-                  • Processing up to {maxConcurrentProcessing} images simultaneously
-                </span>
-              )}
-            </AlertDescription>
-          </Alert>
 
           <div className="flex gap-2 flex-wrap">
             {!isProcessing ? (
@@ -639,11 +596,6 @@ const MultiImageProcessor = ({
                   ⚠️ Download unavailable - missing processed data
                 </div>
               )}
-
-              {/* Credit Cost */}
-              <div className="text-xs text-white/50 text-center">
-                Cost: {image.estimatedCredits || selectedScale} credit{(image.estimatedCredits || selectedScale) !== 1 ? 's' : ''}
-              </div>
             </CardContent>
           </Card>
         ))}
